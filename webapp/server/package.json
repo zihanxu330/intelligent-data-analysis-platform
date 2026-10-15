@@ -1,0 +1,15 @@
+{
+  "name": "quant-ai-server",
+  "version": "1.0.0",
+  "description": "量化回测系统 - Node.js API后端，负责调度Python回测脚本并转发结果给前端",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2"
+  }
+}

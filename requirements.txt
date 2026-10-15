@@ -1,0 +1,10 @@
+akshare
+backtrader
+matplotlib
+pandas
+numpy
+scikit-learn
+lightgbm
+python-dotenv
+requests
+joblib
