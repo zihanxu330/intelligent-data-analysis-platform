@@ -110,7 +110,7 @@ def build_snapshot(panel, model_path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default="output/model_rank.joblib", help="排序模型路径")
+    ap.add_argument("--model", default="output/model_rank_h3p.joblib", help="排序模型路径")
     ap.add_argument("--symbols-file", default="output/symbols_300.txt")
     ap.add_argument("--symbols", type=int, default=None, help="只取前N只(调试)")
     ap.add_argument("--no-refresh", action="store_true", help="用本地库，不拉最新行情")
@@ -122,6 +122,10 @@ def main():
     ap.add_argument("--timing-window", type=int, default=60)
     ap.add_argument("--cash", type=float, default=1_000_000.0)
     ap.add_argument("--report", action="store_true", help="生成下单日报 CSV+MD（供手工下单）")
+    # 成交校准（第2项）：模拟盘手工下单参考价 = 收盘×(1±滑点)，涨跌停提示难成交
+    ap.add_argument("--slippage", type=float, default=0.001, help="双边滑点比例（默认0.1%）")
+    ap.add_argument("--min-commission", type=float, default=5.0, help="单笔最低佣金（元，默认5）")
+    ap.add_argument("--no-limit-check", action="store_true", help="关闭涨跌停成交提示")
     args = ap.parse_args()
 
     os.makedirs(STATE_DIR, exist_ok=True)
@@ -160,6 +164,7 @@ def main():
         state = {"cash": args.cash, "holdings": {}, "last_rebal": None,
                  "total_rebals": 0, "orders": [], "created": str(pd.Timestamp.now())}
     state.setdefault("holdings", {})
+    state.setdefault("buy_dates", {})  # symbol -> YYYY-MM-DD; legacy positions are treated as already T+1 eligible
     state.setdefault("orders", [])
 
     # 3) 打分+择时
@@ -182,44 +187,86 @@ def main():
     print(f"[3/5] 调仓判断: {'需要调仓' if rebal_needed else '未到调仓日，仅更新净值'}")
 
     if rebal_needed:
-        # 5) 调仓执行（当日收盘价模拟成交；严格实盘应次日开盘执行）
+        # 5) 调仓执行（成交校准：参考价=最新收盘×(1±滑点)，涨跌停难成交提示；严格实盘应次日开盘执行）
         print("[4/5] 执行调仓…")
+        limit_check = not args.no_limit_check
         old_holdings = state["holdings"]
-        mv = 0.0
+        buy_dates = state["buy_dates"]
+        execution_date = str(last_date.date())
+        retained = {}
+        retained_buy_dates = {}
+        sale_proceeds = 0.0
         for sym, sh in old_holdings.items():
-            if sym in panel and len(panel[sym]):
-                mv += sh * float(panel[sym]["close"].iloc[-1])
-        # 卖出旧仓：有持仓才扣卖出成本
-        M = state["cash"] + mv
-        if old_holdings:
-            M *= (1.0 - SELL_COST)
-            for sym, sh in old_holdings.items():
-                if sym in panel and len(panel[sym]):
-                    state["orders"].append({
-                        "date": str(last_date.date()), "action": "SELL", "symbol": sym,
-                        "shares": round(sh, 2), "price": round(float(panel[sym]["close"].iloc[-1]), 3),
-                        "cost_pct": round(SELL_COST * 100, 3)})
-        state["holdings"] = {}
+            sh = float(sh)
+            if buy_dates.get(sym) == execution_date:
+                retained[sym] = sh
+                retained_buy_dates[sym] = execution_date
+                state["orders"].append({
+                    "date": execution_date, "action": "HOLD", "symbol": sym,
+                    "shares": round(sh, 2), "reason": "T+1限制：当日买入的持仓不可当日卖出"})
+                continue
+            if sym not in panel or not len(panel[sym]):
+                retained[sym] = sh
+                if sym in buy_dates:
+                    retained_buy_dates[sym] = buy_dates[sym]
+                state["orders"].append({
+                    "date": execution_date, "action": "HOLD", "symbol": sym,
+                    "shares": round(sh, 2), "reason": "行情缺失，暂时保留持仓"})
+                continue
+            px = float(panel[sym]["close"].iloc[-1])
+            prev = float(panel[sym]["close"].iloc[-2]) if len(panel[sym]) > 1 else px
+            limit_down = limit_check and prev > 0 and (px / prev - 1) <= -0.095
+            if limit_down:
+                retained[sym] = sh
+                if sym in buy_dates:
+                    retained_buy_dates[sym] = buy_dates[sym]
+                state["orders"].append({
+                    "date": execution_date, "action": "HOLD", "symbol": sym,
+                    "shares": round(sh, 2), "price": round(px, 3),
+                    "reason": "跌停难卖出，暂保留"})
+                continue
+            ref = round(px * (1.0 - args.slippage), 3)
+            gross = sh * ref
+            sale_proceeds += gross * (1.0 - SELL_COST)
+            state["orders"].append({
+                "date": execution_date, "action": "SELL", "symbol": sym,
+                "shares": round(sh, 2), "price": ref,
+                "cost_pct": round(SELL_COST * 100, 3),
+                "reason": "建议次日开盘卖出"})
+        state["holdings"] = retained
+        state["buy_dates"] = retained_buy_dates
+        M = float(state["cash"]) + sale_proceeds
         state["cash"] = M
 
         if ma60_ok and len(scores) >= args.top_n:
             picks = sorted(scores, key=scores.get, reverse=True)[: args.top_n]
-            per = M * (1.0 - BUY_COST) / args.top_n
+            buyable = [sym for sym in picks if sym not in state["holdings"]]
+            per = M * (1.0 - BUY_COST) / len(buyable) if buyable else 0.0
             spent = 0.0
-            for sym in picks:
+            for sym in buyable:
                 px = float(panel[sym]["close"].iloc[-1])
-                sh = int(per / px / 100) * 100  # A股买入须100股整数倍
+                prev = float(panel[sym]["close"].iloc[-2]) if len(panel[sym]) > 1 else px
+                limit_up = limit_check and prev > 0 and (px / prev - 1) >= 0.095
+                ref = round(px * (1.0 + args.slippage), 3)
+                if limit_up:
+                    state["orders"].append({
+                        "date": str(last_date.date()), "action": "SKIP", "symbol": sym,
+                        "shares": 0, "price": ref, "reason": "涨停买不进"})
+                    continue
+                sh = int(per / ref / 100) * 100  # A股买入须100股整数倍
                 if sh <= 0:
                     state["orders"].append({
                         "date": str(last_date.date()), "action": "SKIP", "symbol": sym,
-                        "shares": 0, "price": round(px, 3), "reason": "资金不足买100股"})
+                        "shares": 0, "price": ref, "reason": "资金不足买100股"})
                     continue
                 state["holdings"][sym] = sh
-                spent += sh * px * (1.0 + BUY_COST)
+                state["buy_dates"][sym] = str(last_date.date())
+                spent += sh * ref * (1.0 + BUY_COST)
                 state["orders"].append({
                     "date": str(last_date.date()), "action": "BUY", "symbol": sym,
-                    "shares": sh, "price": round(px, 3),
-                    "cost_pct": round(BUY_COST * 100, 3)})
+                    "shares": sh, "price": ref,
+                    "cost_pct": round(BUY_COST * 100, 3),
+                    "reason": f"参考价含{args.slippage*100:.1f}%滑点，以次日开盘为准"})
             state["cash"] = M - spent
         else:
             reason = "择时信号为空仓" if not ma60_ok else "有效分数不足"

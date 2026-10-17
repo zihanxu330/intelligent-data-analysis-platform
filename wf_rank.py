@@ -13,8 +13,10 @@ import pandas as pd
 
 PROJ = os.path.dirname(os.path.abspath(__file__))
 os.chdir(PROJ)
-PY = r"C:\Users\22646\AppData\Local\Programs\Python\Python311\python.exe"
+PY = sys.executable
 SYMS_FILE = "output/symbols_300.txt"
+
+HORIZON = 5   # change to 1 or 3 when comparing horizons
 
 FOLDS = [
     {"n": 1, "cut": "20241231", "test_start": "20250101", "test_end": "20250630"},
@@ -25,11 +27,10 @@ FOLDS = [
 rows = []
 for f in FOLDS:
     i = f["n"]
-    rank_model = f"output/wf_f{i}_rank.joblib"
+    rank_model = f"output/wf_f{i}_rank_h{HORIZON}.joblib"
     cls_model = f"output/wf_f{i}_cls.joblib"
     print(f"===== 折{i}: 训练截止 {f['cut']}, 测试 {f['test_start']}~{f['test_end']} =====")
-    subprocess.run([PY, "train_rank.py", "--until", f["cut"], "--out", rank_model],
-                   check=True, stdout=subprocess.DEVNULL)
+    subprocess.run([PY, "train_rank.py", "--until", f["cut"], "--horizon", str(HORIZON), "--out", rank_model], check=True, stdout=subprocess.DEVNULL)
     subprocess.run([PY, "train_model.py", "--model", "lgb", "--until", f["cut"], "--out", cls_model],
                    check=True, stdout=subprocess.DEVNULL)
     for tag, model, scorer in [("rank", rank_model, "rank_score"), ("cls", cls_model, "ai_prob")]:

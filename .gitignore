@@ -13,3 +13,7 @@ data/
 webapp/node_modules/
 .vscode/
 *.log
+
+# 备份与自检产物
+*.bak
+frontend/_shots/

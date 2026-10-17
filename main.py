@@ -8,7 +8,10 @@ CLI/API统一入口。
 """
 import argparse
 import json
+import math
 import os
+import re
+from datetime import datetime
 
 from data.fetcher import generate_synthetic_daily, fetch_stock_daily_local_first
 from backtest.engine import run_backtest
@@ -40,6 +43,25 @@ def main():
                          help="AI过滤阈值，模型预测上涨概率需高于此值才放行买入")
     args = parser.parse_args()
 
+    if not math.isfinite(args.cash) or args.cash <= 0:
+        parser.error('--cash 必须是大于0的有限数值')
+    if args.strategy == 'rule' and (args.fast_period < 1 or args.slow_period < 2
+                                    or args.fast_period >= args.slow_period):
+        parser.error('--fast-period 和 --slow-period 必须为正整数，且快线小于慢线')
+    if not math.isfinite(args.ai_threshold) or not 0 <= args.ai_threshold <= 1:
+        parser.error('--ai-threshold 必须在 0 到 1 之间')
+    if not re.fullmatch(r'\d{8}', args.start) or not re.fullmatch(r'\d{8}', args.end):
+        parser.error('--start 和 --end 必须使用 YYYYMMDD 格式')
+    try:
+        start_date = datetime.strptime(args.start, '%Y%m%d').date()
+        end_date = datetime.strptime(args.end, '%Y%m%d').date()
+    except ValueError:
+        parser.error('--start 或 --end 不是有效日期')
+    if start_date > end_date:
+        parser.error('--start 不能晚于 --end')
+    if args.mode == 'real' and not re.fullmatch(r'\d{6}', args.symbol):
+        parser.error('--mode real 时 --symbol 必须是6位股票代码')
+
     os.makedirs('output', exist_ok=True)
 
     if args.mode == 'synthetic':
@@ -49,10 +71,10 @@ def main():
         print(f'[数据] 真实数据模式（本地优先）: {args.symbol} {args.start}~{args.end}')
         df = fetch_stock_daily_local_first(args.symbol, args.start, args.end)
 
-    print('[数据]', len(df), '条')
+    if df is None or df.empty:
+        raise SystemExit('没有获取到行情数据，请检查股票代码、日期范围或本地数据/网络连接。')
 
-    if args.fast_period >= args.slow_period:
-        raise SystemExit(f'fast-period({args.fast_period}) 必须小于 slow-period({args.slow_period})')
+    print('[数据]', len(df), '条')
 
     plot_path = None if args.no_plot else 'output/equity_curve.png'
 

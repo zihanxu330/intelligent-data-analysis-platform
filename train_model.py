@@ -46,6 +46,106 @@ FEATURE_COLS = [
 # 财务特征（慢变量，季度频率；同花顺源，缺失补0=中性）
 FIN_FEATURES = ["net_profit_yoy", "revenue_yoy", "roe", "debt_ratio"]
 
+# ---- P1 事件特征（公告/研报，窗口聚合；缺失补0=无事件） ----
+EVENT_FEATURES = [
+    "has_ann_5d",            # 近5个交易日有公告
+    "ev_reorg_5d", "ev_perf_5d", "ev_reduce_5d", "ev_buyback_5d",
+    "ev_risk_5d", "ev_biz_5d",   # 近5日有对应事件组公告
+    "praise_20d",            # 近20个交易日有"买入"评级研报（专家唱多）
+    "praise_hi",             # 唱多 × 高位(price_pos_60>0.7)  交互
+    "praise_mom5",           # 唱多 × 近5日大涨(mom5>0.10)    交互
+]
+EV_GROUPS = {
+    "ev_reorg_5d": "重组并购", "ev_perf_5d": "业绩类", "ev_reduce_5d": "减持质押",
+    "ev_buyback_5d": "增持回购", "ev_risk_5d": "风险类", "ev_biz_5d": "经营类",
+}
+ANN_GROUP_MAP = {
+    "重组并购": ["保荐/核查意见", "其他增发事项公告", "关联交易", "收购报告书"],
+    "业绩类": ["业绩预告", "三季度报告全文", "一季度报告全文", "半年度报告全文", "年度报告全文",
+               "业绩快报", "分配方案实施", "分配方案预告", "业绩修正"],
+    "减持质押": ["股份质押、冻结", "股东/实际控制人股份减持", "限售股份上市流通", "权益变动报告书"],
+    "增持回购": ["回购预案", "回购进展情况", "股东/实际控制人股份增持", "员工持股计划", "股权激励进展公告"],
+    "风险类": ["诉讼仲裁", "提供/对外担保公告", "借贷", "股票交易异常波动", "立案调查"],
+    "经营类": ["签订协议", "月度经营情况", "中标"],
+}
+
+
+def _ann_group(t):
+    t = str(t).strip()
+    for g, types in ANN_GROUP_MAP.items():
+        if t in types:
+            return g
+    return "常规低信息"
+
+
+def build_event_map(symbols: list = None):
+    """读公告+研报 -> {symbol: DataFrame[date, has_ann_5d, ev_*_5d, praise_20d]}。
+    date = 该股实际交易日（升序）；各列=当日及之前窗口内有无事件（0/1），无未来泄漏。
+    symbols=None 时用本地库全部股票（预测路径共用）。"""
+    EV_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output", "events")
+    ann_path = os.path.join(EV_DIR, "announcements.csv")
+    res_path = os.path.join(EV_DIR, "research_reports.csv")
+    if not os.path.exists(ann_path):
+        print("[事件] 无 announcements.csv，事件特征全 0")
+        return {}
+    if symbols is None:
+        symbols = list_symbols()
+    ann = pd.read_csv(ann_path, dtype={"代码": str})
+    ann["代码"] = ann["代码"].str.zfill(6)
+    ann["date"] = pd.to_datetime(ann["公告日期"]).dt.normalize()
+    ann["group"] = ann["公告类型"].map(_ann_group)
+    ann_by = {s: g for s, g in ann.groupby("代码")}
+
+    res_by = {}
+    if os.path.exists(res_path):
+        res = pd.read_csv(res_path, dtype={"股票代码": str})
+        res["股票代码"] = res["股票代码"].str.zfill(6)
+        res["date"] = pd.to_datetime(res["日期"]).dt.normalize()
+        res["praise"] = (res["东财评级"] == "买入").astype(int)
+        res_by = {s: g for s, g in res.groupby("股票代码")}
+
+    out = {}
+    for sym in symbols:
+        d = load_daily(sym)
+        if d.empty:
+            continue
+        dates = pd.to_datetime(d["date"]).sort_values().reset_index(drop=True)
+        n = len(dates)
+        if n < 30:
+            continue
+        daily = {c: np.zeros(n) for c in ["has_ann"] + list(EV_GROUPS) + ["praise"]}
+        ts = dates.to_numpy()
+
+        # 公告：事件日对齐到 >= 公告日的第一个交易日（盘后/周末发布 → 下一交易日生效）
+        a = ann_by.get(sym)
+        if a is not None:
+            for ev_date, g in zip(a["date"].to_numpy(), a["group"].to_numpy()):
+                i = np.searchsorted(ts, ev_date)
+                if i < n:
+                    daily["has_ann"][i] = 1
+                    gcol = [k for k, v in EV_GROUPS.items() if v == g]
+                    if gcol:
+                        daily[gcol[0]][i] = 1
+        r = res_by.get(sym)
+        if r is not None:
+            pr = r[r["praise"] == 1]
+            for ev_date in pr["date"].to_numpy():
+                i = np.searchsorted(ts, ev_date)
+                if i < n:
+                    daily["praise"][i] = 1
+
+        ddf = pd.DataFrame(daily, index=range(n))
+        roll5 = ddf.rolling(5, min_periods=1).sum()
+        out[sym] = pd.DataFrame({
+            "date": dates,
+            "has_ann_5d": (roll5["has_ann"] > 0).astype(int),
+            **{c: (roll5[c] > 0).astype(int) for c in EV_GROUPS},
+            "praise_20d": (ddf["praise"].rolling(20, min_periods=1).sum() > 0).astype(int),
+        })
+    print(f"[事件] 事件面板就绪: {len(out)}/{len(symbols)} 只")
+    return out
+
+
 FIN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output", "financials.csv")
 
 
@@ -53,7 +153,8 @@ def load_fin_map():
     """读 financials.csv -> {symbol: DataFrame[avail, 财务特征]}；avail = 报告期+90天（近似披露延迟）。"""
     if not os.path.exists(FIN_PATH):
         return {}
-    df = pd.read_csv(FIN_PATH, parse_dates=["report_date"])
+    df = pd.read_csv(FIN_PATH, parse_dates=["report_date"], dtype={"symbol": str})
+    df["symbol"] = df["symbol"].str.strip().str.zfill(6)   # 修复前导0丢失（2401 -> 002401）
     df["avail"] = df["report_date"] + pd.Timedelta(days=90)
     out = {}
     for sym, g in df.groupby("symbol"):
@@ -61,9 +162,10 @@ def load_fin_map():
     return out
 
 
-def build_features_one_symbol(symbol: str, horizon: int, until=None, fin_map=None) -> pd.DataFrame:
+def build_features_one_symbol(symbol: str, horizon: int, until=None, fin_map=None, event_map=None) -> pd.DataFrame:
     """给单只股票算因子特征 + 标签，返回带symbol列的DataFrame（还没丢弃NaN）。
-    until: 'YYYYMMDD' 或 'YYYY-MM-DD'，仅使用 <= until 的数据（样本外/walk-forward 训练用）。"""
+    until: 'YYYYMMDD' 或 'YYYY-MM-DD'，仅使用 <= until 的数据（样本外/walk-forward 训练用）。
+    event_map: {symbol: 事件面板}（P1 新闻/公告信号，窗口聚合，0/1）。"""
     df = load_daily(symbol)
     if df.empty or len(df) < 80:
         return pd.DataFrame()
@@ -97,11 +199,29 @@ def build_features_one_symbol(symbol: str, horizon: int, until=None, fin_map=Non
         fdf = fin_map[symbol]
         df["_date"] = df["date"]
         merged = pd.merge_asof(
-            df.sort_values("_date"), fdf,
+            df.drop(columns=FIN_FEATURES).sort_values("_date"), fdf,
             left_on="_date", right_on="avail", direction="backward",
         )
         for c in FIN_FEATURES:
             df[c] = merged[c].fillna(0.0)
+        df.drop(columns=["_date"], inplace=True)
+
+    # ---- 事件特征（P1：公告/研报窗口聚合，缺失=0 无事件） ----
+    for c in EVENT_FEATURES:
+        df[c] = 0.0
+    if event_map and symbol in event_map:
+        evdf = event_map[symbol]
+        df["_date"] = df["date"]
+        base_ev = [c for c in EVENT_FEATURES if c not in ("praise_hi", "praise_mom5")]
+        merged = pd.merge_asof(
+            df.drop(columns=EVENT_FEATURES).sort_values("_date"), evdf,
+            left_on="_date", right_on="date", direction="backward",
+        )
+        for c in base_ev:
+            df[c] = merged[c].fillna(0.0)
+        # 交互项：唱多 × 高位 / 唱多 × 近5日大涨（直接由当日价量状态现算）
+        df["praise_hi"] = df["praise_20d"] * (df["price_pos_60"] > 0.7).astype(int)
+        df["praise_mom5"] = df["praise_20d"] * (df["mom5"] > 0.10).astype(int)
         df.drop(columns=["_date"], inplace=True)
 
     # ---- 标签：未来horizon日后收盘价是否上涨 ----
@@ -116,11 +236,11 @@ def build_features_one_symbol(symbol: str, horizon: int, until=None, fin_map=Non
     return df
 
 
-def build_dataset(symbols: list, horizon: int, until=None, fin_map=None) -> pd.DataFrame:
+def build_dataset(symbols: list, horizon: int, until=None, fin_map=None, event_map=None) -> pd.DataFrame:
     """批量拉所有股票的特征，拼成一张大表。"""
     frames = []
     for i, symbol in enumerate(symbols, 1):
-        df = build_features_one_symbol(symbol, horizon, until=until, fin_map=fin_map)
+        df = build_features_one_symbol(symbol, horizon, until=until, fin_map=fin_map, event_map=event_map)
         if df.empty:
             print(f"[跳过 {i}/{len(symbols)}] {symbol} 数据太少")
             continue
@@ -135,6 +255,8 @@ def build_dataset(symbols: list, horizon: int, until=None, fin_map=None) -> pd.D
     feature_cols = list(FEATURE_COLS)
     if fin_map:
         feature_cols += FIN_FEATURES
+    if event_map:
+        feature_cols += EVENT_FEATURES
     full = full.dropna(subset=feature_cols + ["target", "future_ret"]).reset_index(drop=True)
     print(f"\n合并后共 {before} 行，去除指标预热期/无标签的NaN后剩 {len(full)} 行可用于训练")
     return full, feature_cols

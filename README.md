@@ -117,7 +117,7 @@ python main.py --mode real --symbol 600519 --start 20230101 --end 20241231
 - **股票池扩展**：300 只 A 股 × 5 年日线（`output/symbols_300.txt`），23 特征（19 技术 + 4 财务，`factors/factor_lib.py::add_extended_features`）
 - **样本外验证**：holdout 300 只（2026 年）规则 -3.65% vs AI -0.15%，AI 胜 194/300；walk-forward 3 折 rank 平均 +28.07%
 - **排序学习** `train_rank.py`：LGBMRanker 直接优化截面排名（5 档相关度标签），`models/predict.py::add_rank_score` 打分
-- **组合框架** `backtest/portfolio.py`：真实交易成本（买 0.031%/卖 0.081%）、**次日执行**（T+1 无未来函数）、停牌按复牌价成交、择时（fixed/rolling/MA60）
+- **组合框架** `backtest/portfolio.py`：默认次日开盘成交、双边 0.1% 滑点、最低佣金 5 元、100 股整手及涨跌停约束；卖出印花税按历史费率分档（2023-08-28 起 0.05%），停牌保留至复牌估值，支持择时（fixed/rolling/MA60）。板块涨跌停比例仍为近似值，未区分 ST 和新股无涨跌幅限制期。
 - **择时验证**：rank Top5/5 日，MA60 择时 +46.26%（回撤 -9.47% vs 无择时 -32.92%）
 - **Paper Trading** `paper_trade.py`：排序模型 + MA60 择时，每日收盘后运行，状态持久化；`--report` 生成下单日报（CSV+MD）供手工实盘下单过渡
 

@@ -98,19 +98,51 @@ app.post("/api/backtest", async (req, res) => {
   if (!["synthetic", "real"].includes(mode)) {
     return res.status(400).json({ error: "mode 必须是 'synthetic' 或 'real'" });
   }
-  if (Number(fastPeriod) >= Number(slowPeriod)) {
+  const cashValue = Number(cash);
+  const fastValue = Number(fastPeriod);
+  const slowValue = Number(slowPeriod);
+  const isDate = (value) => {
+    if (typeof value !== "string" || !/^\d{8}$/.test(value)) return false;
+    const iso = `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}`;
+    const parsed = new Date(`${iso}T00:00:00Z`);
+    return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === iso;
+  };
+
+  if (!Number.isFinite(cashValue) || cashValue <= 0) {
+    return res.status(400).json({ error: "cash 必须是大于0的有限数值" });
+  }
+  if (!Number.isInteger(fastValue) || !Number.isInteger(slowValue) || fastValue < 1 || slowValue < 2) {
+    return res.status(400).json({ error: "均线周期必须是正整数，且慢线周期至少为2" });
+  }
+  if (fastValue >= slowValue) {
     return res.status(400).json({ error: "快线周期(fastPeriod)必须小于慢线周期(slowPeriod)" });
+  }
+  if (!isDate(start) || !isDate(end) || start > end) {
+    return res.status(400).json({ error: "start/end 必须是有效的 YYYYMMDD 日期，且 start 不晚于 end" });
+  }
+  if (mode === "real" && (typeof symbol !== "string" || !/^\d{6}$/.test(symbol))) {
+    return res.status(400).json({ error: "真实行情模式的 symbol 必须是6位股票代码" });
   }
 
   try {
     const result = await runPythonBacktest({
-      mode, symbol, start, end, cash, fastPeriod, slowPeriod,
+      mode, symbol, start, end, cash: cashValue,
+      fastPeriod: fastValue, slowPeriod: slowValue,
     });
     res.json(result);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
   }
+});
+
+// 生产部署：单服务托管前端静态产物（client/dist 由 npm run build 生成）
+const CLIENT_DIST = path.resolve(__dirname, "..", "client", "dist");
+app.use(express.static(CLIENT_DIST));
+// SPA fallback：非API路由回退到前端入口
+app.get("*", (req, res, next) => {
+  if (req.path.startsWith("/api/")) return next();
+  res.sendFile(path.join(CLIENT_DIST, "index.html"));
 });
 
 app.listen(PORT, () => {

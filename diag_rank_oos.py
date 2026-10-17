@@ -12,7 +12,7 @@ for sym in SYMS:
     df = df[(df["date"] >= "2026-01-01") & (df["date"] <= "2026-10-15")]
     if len(df) < 30: continue
     df = df.sort_values("date").reset_index(drop=True)
-    df = add_rank_score(df, model_path="output/model_rank.joblib", symbol=sym)
+    df = add_rank_score(df, model_path="output/model_rank_h3p.joblib", symbol=sym)
     df = add_ai_score(df, model_path="output/model_oos_20260101.joblib", symbol=sym)
     df["fwd5"] = df["close"].shift(-5) / df["close"] - 1
     panels[sym] = df.set_index("date")[["close", "rank_score", "ai_prob", "fwd5"]]
