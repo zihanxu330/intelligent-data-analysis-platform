@@ -162,10 +162,12 @@ def load_fin_map():
     return out
 
 
-def build_features_one_symbol(symbol: str, horizon: int, until=None, fin_map=None, event_map=None) -> pd.DataFrame:
+def build_features_one_symbol(symbol: str, horizon: int, until=None, fin_map=None, event_map=None,
+                              label_threshold: float = None) -> pd.DataFrame:
     """给单只股票算因子特征 + 标签，返回带symbol列的DataFrame（还没丢弃NaN）。
     until: 'YYYYMMDD' 或 'YYYY-MM-DD'，仅使用 <= until 的数据（样本外/walk-forward 训练用）。
-    event_map: {symbol: 事件面板}（P1 新闻/公告信号，窗口聚合，0/1）。"""
+    event_map: {symbol: 事件面板}（P1 新闻/公告信号，窗口聚合，0/1）。
+    label_threshold: None=旧口径（未来涨=1）；>0=“未来跌幅超过 threshold”=1（大跌预警）。"""
     df = load_daily(symbol)
     if df.empty or len(df) < 80:
         return pd.DataFrame()
@@ -224,10 +226,13 @@ def build_features_one_symbol(symbol: str, horizon: int, until=None, fin_map=Non
         df["praise_mom5"] = df["praise_20d"] * (df["mom5"] > 0.10).astype(int)
         df.drop(columns=["_date"], inplace=True)
 
-    # ---- 标签：未来horizon日后收盘价是否上涨 ----
+    # ---- 标签：默认未来horizon日涨/跌；指定 label_threshold 时改为“大跌” ----
     future_return = df["close"].shift(-horizon) / df["close"] - 1
     df["future_ret"] = future_return  # 排序学习(rank)用原始未来收益做组内排名标签
-    df["target"] = (future_return > 0).astype(int)
+    if label_threshold is None:
+        df["target"] = (future_return > 0).astype(int)
+    else:
+        df["target"] = (future_return < -float(label_threshold)).astype(int)
     # 最后horizon行没有"未来"数据，标签是无效的，后面会连同NaN特征一起丢弃
     df.loc[df.index[-horizon:], "target"] = np.nan
     df.loc[df.index[-horizon:], "future_ret"] = np.nan
@@ -236,11 +241,13 @@ def build_features_one_symbol(symbol: str, horizon: int, until=None, fin_map=Non
     return df
 
 
-def build_dataset(symbols: list, horizon: int, until=None, fin_map=None, event_map=None) -> pd.DataFrame:
+def build_dataset(symbols: list, horizon: int, until=None, fin_map=None, event_map=None,
+                  label_threshold=None) -> pd.DataFrame:
     """批量拉所有股票的特征，拼成一张大表。"""
     frames = []
     for i, symbol in enumerate(symbols, 1):
-        df = build_features_one_symbol(symbol, horizon, until=until, fin_map=fin_map, event_map=event_map)
+        df = build_features_one_symbol(symbol, horizon, until=until, fin_map=fin_map,
+                                       event_map=event_map, label_threshold=label_threshold)
         if df.empty:
             print(f"[跳过 {i}/{len(symbols)}] {symbol} 数据太少")
             continue
@@ -344,6 +351,9 @@ def main():
                          help="模型输出路径（walk-forward 每折输出到不同文件）")
     parser.add_argument("--model", type=str, default="rf", choices=["rf", "lgb"],
                          help="模型类型：rf=随机森林(默认) lgb=LightGBM")
+    parser.add_argument("--label-threshold", type=float, default=None,
+                         help="传入后切换为“大跌预警”标签：未来 horizon 日跌幅 > 该值记 1；"
+                              "不传保持旧的涨/跌标签。常用 0.02")
     args = parser.parse_args()
 
     symbols = ([s.strip() for s in args.symbols.split(",")] if args.symbols
@@ -358,7 +368,11 @@ def main():
     else:
         print("财务特征不可用（未找到 output/financials.csv，仅使用技术特征）")
 
-    full, feature_cols = build_dataset(symbols, horizon=args.horizon, until=args.until, fin_map=fin_map)
+    full, feature_cols = build_dataset(symbols, horizon=args.horizon, until=args.until,
+                                       fin_map=fin_map, label_threshold=args.label_threshold)
+    if args.label_threshold is not None:
+        pos = float(full["target"].mean())
+        print(f"大跌标签：未来{args.horizon}日跌幅 > {args.label_threshold:.2%} 的正样本占比 {pos:.2%}")
     train_df, test_df = time_based_split(full, test_ratio=args.test_ratio)
     print(f"训练集 {len(train_df)} 行，测试集 {len(test_df)} 行")
 
@@ -370,10 +384,16 @@ def main():
     joblib.dump({
         "model": model,
         "feature_cols": feature_cols,
-        "horizon": args.horizon,
-        "model_type": args.model,
-        "trained_on_symbols": symbols,
-        "train_until": args.until,
+        "objective": "binary",
+        "meta": {
+            "horizon": args.horizon,
+            "model_type": args.model,
+            "trained_on_symbols": symbols,
+            "train_until": args.until,
+            "label_threshold": args.label_threshold,
+            "threshold": args.label_threshold,
+            "label_mode": "crash" if args.label_threshold is not None else "updown",
+        },
     }, out_path)
     print(f"\n模型已保存至 {out_path}")
 
