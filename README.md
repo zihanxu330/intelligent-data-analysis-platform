@@ -1,5 +1,95 @@
 # quant_ai —— A股量化回测最小可用系统
 
+> **2026-10-19 审计提示**：当前生产口径是**全池 5,225 只**（`output/symbols_full.txt`，实际有日线 5,224），生产模型 `output/model_rank_h3p_full.joblib` 的 `train_until=20261015`。本文下方“300 只股票池 / 23 特征 / walk-forward 平均 +28.07%”等数字是**历史 300 池记录**，不可作为当前全池结论。最新审计见 `output/audit_20261019/AUDIT_REPORT_20261019.md`，全池 walk-forward 与数据口径以该报告为准。
+
+
+## 当前阶段与工程入口（2026-10-21）
+
+当前处于 **Stage39 执行日等待**：
+
+- 生产 `output/quant.db` 仍停在 **2026-10-16**；
+- Stage37 已建立 5,190 只 eligible pool 的纸面 run；
+- Stage38/39 核实 2026-10-22 行情未到，70 条订单保持 pending/blocked；
+- 没有成交、持仓或前瞻 NAV 绩效；
+- 本阶段未改生产库、生产模型和 `paper_trade.py`；工作区已有未提交的 `paper_trade.py`/`pipeline.py`/`requirements.txt` 修改，需另行 review，本阶段未处理。
+
+### 快速开始
+
+```bash
+python -m pip install -r requirements.txt
+python -m unittest discover -s tests -v
+python tools/project_healthcheck.py
+python tools/project_healthcheck.py --json
+python tools/project_healthcheck.py --as-of 2026-10-21 --expected-date 2026-10-21
+python tools/research_index_check.py --json
+```
+
+健康检查默认只读、不联网；`--json` 输出机器可读报告；不传 `--expected-date` 时行情新鲜度为 `unknown`，不猜交易日。
+
+### 关键目录
+
+| 路径 | 用途 |
+|---|---|
+| `main.py` / `pipeline.py` | 主回测入口 / 行情更新入口 |
+| `data_engine/` | 本地数据库、增量行情、raw 行情层 |
+| `factors/` | 因子与特征工程 |
+| `models/` | 模型加载与打分 |
+| `backtest/` | 回测与组合约束 |
+| `strategy/` | 策略 |
+| `tools/project_healthcheck.py` | 只读健康检查 |
+| `tools/research_index_check.py` | 只读研究索引一致性检查 |
+| `output/quant.db` | 生产行情库（只读检查，不随意写） |
+| `output/research_stage*` | 冻结研究产物 |
+| `docs/research-index.md` | Stage 研究产物索引 |
+
+### 常用命令与副作用
+
+| 命令 | 作用 | 联网 | 写数据库/模型 | 备注 |
+|---|---|---|---|---|
+| `python main.py --mode synthetic` | 离线合成回测 | 否 | 否 | 安全 |
+| `python main.py --mode real --symbol 600519` | 真实行情回测 | 是 | 写运行产物/缓存 | 可能写 `output/cache` |
+| `python pipeline.py` | 行情更新 | 是 | 写 `output/quant.db` | 生产数据入口，谨慎运行 |
+| `python research/stage37_eligible_pool.py` | 重建 eligible pool 纸面信号 | 否 | 只写 Stage37 研究目录 | 会重算模型评分 |
+| `python research/stage39_execution.py` | 执行日数据审计 | 是 | 只写 Stage39 研究目录 | 目标日未到则保持 pending |
+| `python paper_trade.py` | 生产纸面跟踪 | 是 | 写 `output/paper` | 不是研究脚本，谨慎运行 |
+| `python train_rank.py` | 训练排序模型 | 否 | 写模型 | 本阶段不执行 |
+| `python predict_weekly_top20.py` | 生成 Top20 预测 | 否 | 写 `output` 预测文件 | 不等于前瞻成交 |
+
+### 研究、纸面、生产三层
+
+- **研究结论**：`output/research_stage*/final_assessment.md`，可能部分完成/受阻，不等于可交易。
+- **纸面跟踪**：Stage37 的 5,190 eligible pool；有 pending 订单不等于成交，无 10-22 数据就没有 fills/NAV。
+- **生产配置**：`output/quant.db`、`output/model_rank_h3p_full.joblib`、`paper_trade.py`。研究脚本不得写这些对象。
+
+### 已知限制
+
+- 生产库仍是 stale-qfq，锚点推断 2026-10-16；
+- 5,225 只中 35 只不可评分（25 只上市不足 60 日、10 只无 10-21 行情）；
+- 纸面 run 只覆盖 5,190 只 eligible pool，不是全池；
+- 2026-10-22 执行数据尚未到达；
+- 尚无稳定 Alpha 的证据。
+
+详细阶段索引见 [`docs/research-index.md`](docs/research-index.md)。
+
+## raw 行情层（独立于生产库）
+
+`data_engine/raw_market.py` 是新浪 KLC raw 日线的抓取、离线解码、校验和独立存储模块：
+
+- 只接受 `price_basis=raw`；
+- 原始 body 落盘 + SHA-256；
+- 目标日、无数据、解析失败、请求失败分开；
+- amount/turnover 缺失保留 NULL；
+- `RawStore` 只追加，冲突写 `raw_daily_conflicts`；
+- 不写 `output/quant.db`，不生成信号/订单。
+
+```bash
+python -m data_engine.raw_market init --db output/forward_raw.db
+python -m data_engine.raw_market parse --klc fixture.js --symbol 600000 --date 2026-10-20
+python -m unittest discover -s tests -v
+```
+
+详见 `docs/raw_market.md`。
+
 ## 目录结构
 
 ```
@@ -120,6 +210,41 @@ python main.py --mode real --symbol 600519 --start 20230101 --end 20241231
 - **组合框架** `backtest/portfolio.py`：默认次日开盘成交、双边 0.1% 滑点、最低佣金 5 元、100 股整手及涨跌停约束；卖出印花税按历史费率分档（2023-08-28 起 0.05%），停牌保留至复牌估值，支持择时（fixed/rolling/MA60）。板块涨跌停比例仍为近似值，未区分 ST 和新股无涨跌幅限制期。
 - **择时验证**：rank Top5/5 日，MA60 择时 +46.26%（回撤 -9.47% vs 无择时 -32.92%）
 - **Paper Trading** `paper_trade.py`：排序模型 + MA60 择时，每日收盘后运行，状态持久化；`--report` 生成下单日报（CSV+MD）供手工实盘下单过渡
+
+## 个股涨跌归因（analyze_move.py）
+
+给定股票和区间，把"为什么涨/跌"拆成可复现的事实链，输出 Markdown 报告 + JSON 事实包 + 图表：
+
+```bash
+python analyze_move.py --symbol 603986 --start 20260101 --end 20261016
+python analyze_move.py --symbol 600519 --start 20260101 --end 20260630 --top-days 8
+```
+
+输出到 `output/analysis/<code>_<start>_<end>.{md,json,png}`：
+
+- **收益拆解**：市场（全市场等权）+ 行业超额（行业等权 - 市场）+ 个股特质（个股 - 行业），对数贡献可加
+- **CAPM**：β、α、R²；**关键交易日**：涨跌停、跳空、量比、当日行业超额、±N 日公告/研报
+- **事件时间线**：重大公告、研报评级、财报（按 +90 天披露滞后对齐）
+- **因子画像**：动量、波动、RSI、价格位置、量比，给自身 3 年分位
+- **规则化结论**：只引用报告里的数字，不做因果断言
+
+数据边界：公告只覆盖 2025-10 之后；研报只覆盖 250 只老池；价格为不复权收盘价；市场基准是当前存续 5225 只的等权，存在幸存者偏差（早期年份市场收益可能偏高）。报告末尾会自动列出这些警告。
+
+### 可选的 LLM 解读（事实约束）
+
+```bash
+# 任意 OpenAI 兼容端点；PowerShell 用 $env:LLM_API_KEY="..."
+set LLM_API_KEY=sk-xxx
+set LLM_BASE_URL=https://api.deepseek.com/v1
+set LLM_MODEL=deepseek-chat
+
+python analyze_move.py --symbol 603986 --start 20260101 --end 20261016 --llm
+python analyze_move.py --symbol 603986 --start 20260101 --end 20261016 --llm-dry-run
+```
+
+- `--llm-dry-run` 只生成 `_llm_prompt.txt`，不调用 API，方便先检查事实包。
+- `--llm` 输出 `_llm.md`，并追加到报告末尾的“AI 解读（事实约束）”。
+- prompt 强制模型只能引用 JSON 事实、每条结论带日期/数字、不得编造公告；归因不等于因果。
 
 ## 重要提醒
 
