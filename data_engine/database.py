@@ -58,12 +58,14 @@ def save_daily(symbol: str, df: pd.DataFrame) -> int:
 
     with get_conn() as conn:
         conn.executemany(f"""
-            INSERT INTO daily_bars ({",".join(cols)})
-            VALUES ({",".join(["?"] * len(cols))})
+            INSERT INTO daily_bars ({','.join(cols)})
+            VALUES ({','.join(['?'] * len(cols))})
             ON CONFLICT(symbol, date) DO UPDATE SET
                 open=excluded.open, high=excluded.high, low=excluded.low,
                 close=excluded.close, volume=excluded.volume,
-                amount=excluded.amount, turnover=excluded.turnover
+                -- Never let a missing liquidity field erase a known value.
+                amount=COALESCE(excluded.amount, daily_bars.amount),
+                turnover=COALESCE(excluded.turnover, daily_bars.turnover)
         """, rows)
     return len(rows)
 

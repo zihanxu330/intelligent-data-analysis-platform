@@ -27,6 +27,7 @@ from datetime import datetime
 
 from data.itick_fetcher import fetch_stock_daily_itick
 from data_engine.database import save_daily, has_data, latest_date, list_symbols
+from data_engine.incremental_gap import missing_dates
 from data_engine.stock_list import get_stock_list
 
 # 免费套餐每分钟5次调用，13秒/次留了一点余量，避免卡在限流边缘
@@ -67,16 +68,27 @@ def download_batch(symbols: list, start: str, end: str, retry: int = 3,
     print(f"\n===== 下载完成: 成功 {ok}, 失败 {fail} =====")
 
 
-def update_existing(retry: int = 3, sleep_between: float = DEFAULT_SLEEP):
-    """增量更新：本地库里已有的股票，只补最新数据到今天。"""
+def update_existing(retry: int = 3, sleep_between: float = DEFAULT_SLEEP, target_dates: list = None):
+    """增量更新：本地库里已有的股票，只补最新数据到今天。
+
+    target_dates 明确时按目标交易日差集更新，不会因已有更晚日期而漏掉中间缺日。
+    """
     symbols = list_symbols()
     today = datetime.now().strftime("%Y%m%d")
     print(f"本地库里共有 {len(symbols)} 只股票，开始增量更新至 {today}")
     for i, symbol in enumerate(symbols, 1):
-        last = latest_date(symbol)
-        start = last.replace("-", "") if last else DEFAULT_EARLIEST_START
-        print(f"[{i}/{len(symbols)}] {symbol} 从 {start} 补到 {today}")
-        download_one(symbol, start, today, retry=retry, sleep=sleep_between)
+        if target_dates:
+            miss = missing_dates(symbol, target_dates)
+            if not miss:
+                print(f"[跳过 {i}/{len(symbols)}] {symbol} 目标交易日已齐")
+                continue
+            start, end = min(miss), max(miss)
+        else:
+            last = latest_date(symbol)
+            start = last.replace("-", "") if last else DEFAULT_EARLIEST_START
+            end = today
+        print(f"[{i}/{len(symbols)}] {symbol} 从 {start} 补到 {end}")
+        download_one(symbol, start, end, retry=retry, sleep=sleep_between)
         time.sleep(sleep_between)
 
 
@@ -92,10 +104,11 @@ def main():
                          help="每只股票之间的等待秒数，免费套餐每分钟5次调用，别调太小")
     parser.add_argument("--skip-existing", action="store_true", help="本地已有数据的股票跳过，不重新下载")
     parser.add_argument("--update-existing", action="store_true", help="只增量更新本地库里已有的股票到最新")
+    parser.add_argument("--target-dates", type=str, default=None, help="逗号分隔目标交易日，如 20261019,20261020；用于中间缺日检查")
     args = parser.parse_args()
 
     if args.update_existing:
-        update_existing(retry=args.retry, sleep_between=args.sleep)
+        update_existing(retry=args.retry, sleep_between=args.sleep, target_dates=(args.target_dates.split(",") if args.target_dates else None))
         return
 
     if args.symbols:
