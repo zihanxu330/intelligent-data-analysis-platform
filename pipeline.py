@@ -30,15 +30,17 @@ import time
 import random
 import subprocess
 import datetime
+from pathlib import Path
 
 import pandas as pd
 import akshare as ak
 
-PROJ = os.path.dirname(os.path.abspath(__file__))
+PROJ = str(Path(__file__).resolve().parent)
 os.chdir(PROJ)
 sys.path.insert(0, PROJ)
 
 from data_engine.database import save_daily, has_data, list_symbols, latest_date
+from data_engine.incremental_gap import missing_dates
 from data_engine.stock_list import get_stock_list
 
 DEFAULT_SLEEP = 1.0
@@ -69,8 +71,14 @@ def download_one_sina(sym: str, start: str, end: str, retry: int = DEFAULT_RETRY
                                     "最高": "high", "最低": "low", "成交量": "volume",
                                     "成交额": "amount", "换手率": "turnover"})
             # 新浪返回列：date, open, high, low, close, volume, amount, outstanding_share, turnover
-            keep = ["date", "open", "high", "low", "close", "volume"]
+            # 保留流动性字段；turnover 是小数，写库统一为百分数。
+            keep = ["date", "open", "high", "low", "close", "volume", "amount", "turnover"]
             df = df[[c for c in keep if c in df.columns]]
+            for c in ("amount", "turnover"):
+                if c in df.columns:
+                    df[c] = pd.to_numeric(df[c], errors="coerce")
+            if "turnover" in df.columns:
+                df["turnover"] = df["turnover"] * 100.0
             n = save_daily(sym, df)
             dmin = str(df["date"].min())[:10]
             dmax = str(df["date"].max())[:10]
@@ -89,16 +97,26 @@ def _norm_ymd(s: str) -> str:
     return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
 
 
-def run_download(symbols: list, start: str, end: str, sleep: float = DEFAULT_SLEEP):
+def run_download(symbols: list, start: str, end: str, sleep: float = DEFAULT_SLEEP, target_dates: list = None):
     print(f"\n===== [1/3] 批量下载 {len(symbols)} 只 ({start}~{end}) =====")
     ok = fail = skip = 0
     for i, sym in enumerate(symbols, 1):
-        if has_data(sym) and latest_date(sym) >= _norm_ymd(end):
-            print(f"[跳过 {i}/{len(symbols)}] {sym} 本地已有最新数据")
-            skip += 1
-            continue
+        # target_dates 明确时检查差集，避免“已有较新日期”掩盖中间缺日。
+        if target_dates:
+            miss = missing_dates(sym, target_dates)
+            if not miss:
+                print(f"[跳过 {i}/{len(symbols)}] {sym} 目标交易日已齐")
+                skip += 1
+                continue
+            req_start, req_end = min(miss), max(miss)
+        else:
+            if has_data(sym) and latest_date(sym) >= _norm_ymd(end):
+                print(f"[跳过 {i}/{len(symbols)}] {sym} 本地已有最新数据")
+                skip += 1
+                continue
+            req_start, req_end = start, end
         print(f"[{i}/{len(symbols)}] 下载 {sym} ...")
-        if download_one_sina(sym, start, end, sleep=sleep):
+        if download_one_sina(sym, req_start, req_end, sleep=sleep):
             ok += 1
         else:
             fail += 1
@@ -355,6 +373,7 @@ def main():
     parser.add_argument("--start", type=str, default="20250501")
     parser.add_argument("--end", type=str, default=datetime.date.today().strftime("%Y%m%d"))
     parser.add_argument("--sleep", type=float, default=DEFAULT_SLEEP)
+    parser.add_argument("--target-dates", type=str, default=None, help="逗号分隔目标交易日，如 20261019,20261020；用于中间缺日检查")
     parser.add_argument("--test-start", type=str, default=None, dest="test_start",
                         help="样本外对比：训练只用该日期之前的数据，回测从该日期开始（YYYYMMDD）")
     parser.add_argument("--wf-folds", type=int, default=None, dest="wf_folds",
@@ -374,14 +393,14 @@ def main():
     do_all = args.all or not (args.download or args.train or args.compare)
 
     if do_all:
-        run_download(symbols, args.start, args.end, sleep=args.sleep)
+        run_download(symbols, args.start, args.end, sleep=args.sleep, target_dates=(args.target_dates.split(",") if args.target_dates else None))
         run_train(symbols)
         run_compare(symbols, start=args.start, end=args.end,
                     test_start=args.test_start, wf_folds=args.wf_folds,
                     model_type=args.model)
     else:
         if args.download:
-            run_download(symbols, args.start, args.end, sleep=args.sleep)
+            run_download(symbols, args.start, args.end, sleep=args.sleep, target_dates=(args.target_dates.split(",") if args.target_dates else None))
         if args.train:
             run_train(symbols)
         if args.compare:
