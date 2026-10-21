@@ -11,7 +11,7 @@
   - 特征：与 train_model.py 完全一致的 23 个（技术19 + 财务4）
 
 用法:
-    python train_rank.py --until 20251231 --out output/model_rank_h3p.joblib
+    python train_rank.py --until 20251231 --out output/model_rank_h3p_full.joblib
     python train_rank.py --symbols 000001,600519 --out output/model_rank_small.joblib
 
 验证：控制台输出测试期按截面的排序质量及 Top5 平均收益 vs 全池平均。
@@ -80,7 +80,7 @@ def ndcg_at_k(test_df: pd.DataFrame, k: int = 5):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--horizon", type=int, default=3,
-                        help="排序标签预测期限（默认3日，与默认模型名 model_rank_h3p.joblib 一致）")
+                        help="排序标签预测期限（默认3日，与默认模型名 model_rank_h3p_full.joblib 一致）")
     parser.add_argument("--n-estimators", type=int, default=400)
     parser.add_argument("--test-ratio", type=float, default=0.2)
     parser.add_argument("--symbols", type=str, default=None,
@@ -89,7 +89,12 @@ def main():
                         help="只用 <= 该日期的数据训练（样本外口径）")
     parser.add_argument("--purge", type=int, default=None,
                         help="从训练数据尾部剔除最后N个交易日（防标签跨越切分点；默认=horizon）")
-    parser.add_argument("--out", type=str, default="output/model_rank_h3p.joblib")
+    parser.add_argument("--out", type=str, default="output/model_rank_h3p_full.joblib")
+    parser.add_argument("--label-mode", choices=["close", "exec", "exec_3d", "exec_rebalance"], default="close",
+                        help="close=收盘→收盘；exec/exec_3d=次日开盘→t+h收盘；"
+                             "exec_rebalance=次日开盘→下次调仓执行日开盘（匹配 5 日调仓）")
+    parser.add_argument("--rebalance-days", type=int, default=5,
+                        help="exec_rebalance 用的调仓周期（默认5，需与 portfolio.py --rebalance 一致）")
     parser.add_argument("--no-prune", action="store_true",
                         help="关闭死特征剪枝（默认剪掉 vwap_dev/price_vs_ma20/boll_pct/trend_strength）")
     event_group = parser.add_mutually_exclusive_group()
@@ -102,6 +107,8 @@ def main():
 
     if args.horizon < 1 or args.n_estimators < 1:
         parser.error("--horizon 和 --n-estimators 必须为正整数")
+    if args.rebalance_days < 1:
+        parser.error("--rebalance-days 必须为正整数")
     if args.purge is not None and args.purge < 0:
         parser.error("--purge 不能为负数")
     if not 0 < args.test_ratio < 1:
@@ -113,14 +120,48 @@ def main():
     if args.until:
         print(f"样本外模式：训练数据截止 {args.until}")
 
+    mode = "exec_3d" if args.label_mode == "exec" else args.label_mode
+    R = args.rebalance_days
+    if mode == "exec_rebalance":
+        # signal t close -> buy t+1 open -> next rebalance exec t+R+1 open
+        build_horizon = R + 1
+        future_offset = R + 1
+        effective_horizon = R
+        label_formula = f"open(t+{R + 1})/open(t+1)-1"
+    elif mode == "exec_3d":
+        build_horizon = args.horizon
+        future_offset = args.horizon
+        effective_horizon = args.horizon
+        label_formula = f"close(t+{args.horizon})/open(t+1)-1"
+    else:
+        build_horizon = args.horizon
+        future_offset = args.horizon
+        effective_horizon = args.horizon
+        label_formula = f"close(t+{args.horizon})/close(t)-1"
+
     fin_map = load_fin_map()
     event_map = build_event_map(symbols) if args.with_event else {}
-    full, feature_cols = build_dataset(symbols, horizon=args.horizon,
+    full, feature_cols = build_dataset(symbols, horizon=build_horizon,
                                        until=args.until, fin_map=fin_map, event_map=event_map)
+    print(f"标签口径: {mode} | 公式: {label_formula} | 实际持有 {effective_horizon} 日 | "
+          f"最长前瞻 {future_offset} 日")
+    if mode != "close":
+        full = full.sort_values(["symbol", "date"]).reset_index(drop=True)
+        if mode == "exec_3d":
+            fwd_close = full.groupby("symbol")["close"].shift(-args.horizon)
+            next_open = full.groupby("symbol")["open"].shift(-1)
+            full["future_ret"] = fwd_close / next_open - 1
+        else:
+            buy_open = full.groupby("symbol")["open"].shift(-1)
+            sell_open = full.groupby("symbol")["open"].shift(-(R + 1))
+            full["future_ret"] = sell_open / buy_open - 1
+        before = len(full)
+        full = full.dropna(subset=["future_ret"]).reset_index(drop=True)
+        print(f"可执行标签有效 {len(full)} 行（原 {before} 行）")
     full = add_rank_labels(full)
     # purge/embargo：剔除尾部 N 个交易日，使训练集最后一日的标签窗口不跨越
-    # 后续的 train/test 切分点（标签 future_ret 用到 +horizon 日，若跨过切分点即泄漏）。
-    purge = args.purge if args.purge is not None else args.horizon
+    # 后续的 train/test 切分点；exec_rebalance 的最长前瞻是 R+1 日。
+    purge = args.purge if args.purge is not None else future_offset
     if purge > 0:
         all_dates = sorted(full["date"].unique())
         if len(all_dates) <= purge + 1:
@@ -141,7 +182,7 @@ def main():
     full["sample_weight"] = np.exp(-days_from_last / 180.0)
 
     train_df, test_df = date_split_by_dates(full, test_ratio=args.test_ratio,
-                                            purge=max(args.horizon, purge))
+                                            purge=max(future_offset, purge))
     print(f"训练集 {len(train_df)} 行（{train_df['date'].nunique()} 个交易日截面）")
     print(f"测试集 {len(test_df)} 行（{test_df['date'].nunique()} 个交易日截面）")
 
@@ -179,7 +220,7 @@ def main():
     if ndcg:
         topk, pool = ndcg
         print(f"\n===== 测试期排序质量 =====")
-        print(f"Top-5平均未来{args.horizon}日收益: {topk * 100:.2f}%  vs  全池平均: {pool * 100:.2f}%  (差 {(topk - pool) * 100:.2f}pct)")
+        print(f"Top-5平均未来{effective_horizon}日收益: {topk * 100:.2f}%  vs  全池平均: {pool * 100:.2f}%  (差 {(topk - pool) * 100:.2f}pct)")
         print(f"→ 正值说明模型选出的Top-5确实比随机/全池强")
 
     # 验证完成后，用完整的可用训练区间（外部 cut 前已 purge）重训最终模型。
@@ -187,9 +228,15 @@ def main():
     model.fit(full[feature_cols], full["rank_label"], group=final_groups,
               sample_weight=full["sample_weight"].to_numpy())
     save_bundle(model, feature_cols, args.out, objective="rank",
-                meta={"horizon": args.horizon, "model_type": "lgb_ranker",
+                meta={"horizon": effective_horizon, "model_type": "lgb_ranker",
+                      "label_mode": mode, "label_formula": label_formula,
+                      "future_offset_days": future_offset, "rebalance_days": R,
                       "trained_on_symbols": symbols, "train_until": args.until,
-                      "purge_days": max(args.horizon, purge)})
+                      "train_start": str(pd.Timestamp(full["date"].min()).date()),
+                      "train_end": str(pd.Timestamp(full["date"].max()).date()),
+                      "train_rows": len(full), "pool_size": len(symbols),
+                      "n_features": len(feature_cols),
+                      "purge_days": max(future_offset, purge)})
     out_path = args.out
     print(f"\n排序模型已保存至 {out_path}")
     print("用法: python backtest/portfolio.py --model <模型> --scorer rank_score ...")
