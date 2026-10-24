@@ -1,4 +1,0 @@
-frontend: 200 react-root: True
-health: 200 {"status":"ok"}
-backtest metrics: {"initial_cash": 100000, "final_value": 100000, "total_return": 0, "sharpe_ratio": null, "max_drawdown_pct": 0, "total_trades": 0, "won_trades": 0, "win_rate": null}
-candles: 117 | equity: 117 | trades: 0

@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 from tools.project_healthcheck import main, run
 
@@ -91,9 +92,23 @@ class HealthcheckTests(unittest.TestCase):
 
     def test_freshness_equal(self):
         make_root(self.root)
-        r = run(self.root, as_of=__import__("datetime").date(2026, 10, 21), expected_date=__import__("datetime").date(2026, 10, 21))
+        # This fixture represents the supported, fully installed environment.
+        # Keep this test independent from the developer machine's packages.
+        with patch("tools.project_healthcheck.sys.version_info", (3, 11, 9)), \
+             patch("tools.project_healthcheck.importlib.util.find_spec", return_value=True):
+            r = run(self.root, as_of=__import__("datetime").date(2026, 10, 21), expected_date=__import__("datetime").date(2026, 10, 21))
+        self.assertEqual(r["structure_status"], "ok")
         self.assertEqual(r["market_data_status"], "fresh")
         self.assertTrue(r["market_data"]["allow_paper_execution"])
+
+    def test_fresh_data_does_not_override_an_environment_warning(self):
+        make_root(self.root)
+        with patch("tools.project_healthcheck.sys.version_info", (3, 12, 0)), \
+             patch("tools.project_healthcheck.importlib.util.find_spec", return_value=True):
+            r = run(self.root, as_of=__import__("datetime").date(2026, 10, 21), expected_date=__import__("datetime").date(2026, 10, 21))
+        self.assertEqual(r["market_data_status"], "fresh")
+        self.assertEqual(r["structure_status"], "warning")
+        self.assertFalse(r["market_data"]["allow_paper_execution"])
 
     def test_freshness_stale(self):
         make_root(self.root)

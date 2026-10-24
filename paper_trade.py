@@ -30,8 +30,8 @@ os.chdir(PROJ)
 sys.path.insert(0, PROJ)
 
 from data_engine.database import load_daily          # noqa: E402
-from models.predict import add_rank_score, add_warn_score   # noqa: E402
-from backtest.portfolio import is_st_or_delisted, _allocate_capped_weights     # noqa: E402  # 与回测同一套 ST/退 判定与权重分配
+from models.predict import add_rank_score   # noqa: E402
+from backtest.portfolio import _allocate_capped_weights     # noqa: E402  # 与回测同一套 ST/退 判定与权重分配
 
 STATE_DIR = os.path.join("output", "paper")
 STATE_FILE = os.path.join(STATE_DIR, "paper_state.json")
@@ -184,9 +184,32 @@ def industry_capped_weights(picks, ind_map, industry_cap):
     return w
 
 
+def _load_st_classifier():
+    """Do not invent or bypass the missing ST/delisting filter."""
+    from backtest import portfolio
+    classifier = getattr(portfolio, "is_st_or_delisted", None)
+    if not callable(classifier):
+        raise RuntimeError("Paper tracking is unavailable: backtest.portfolio does not define is_st_or_delisted")
+    return classifier
+
+
+def is_st_or_delisted(name):
+    return _load_st_classifier()(name)
+
+
+def _load_warn_scorer():
+    """Validate the optional scorer before any data fetch or state write."""
+    from models import predict
+    scorer = getattr(predict, "add_warn_score", None)
+    if not callable(scorer):
+        raise RuntimeError("--warn-model is unavailable: models.predict does not define add_warn_score")
+    return scorer
+
+
 def build_snapshot(panel, model_path, warn_model=None, warn_symbols=None):
     """给最新交易日打分+算择时信号，返回 (last_date, scores, equity_index, ma60_ok, warn_scores)。
     warn_symbols: 只对这些股票算 warn_prob（当前持仓），避免每日重复给全池打分。"""
+    warn_scorer = _load_warn_scorer() if warn_model else None
     all_dates = sorted(set().union(*[pd.to_datetime(p["date"]) for p in panel.values()]))
     last = all_dates[-1]
     scores = {}
@@ -199,7 +222,7 @@ def build_snapshot(panel, model_path, warn_model=None, warn_symbols=None):
             continue
         p = add_rank_score(p, model_path=model_path, symbol=sym)
         if warn_model and (warn_symbols is None or sym in warn_symbols):
-            p = add_warn_score(p, model_path=warn_model, symbol=sym)
+            p = warn_scorer(p, model_path=warn_model, symbol=sym)
         row = p.iloc[-1]
         if pd.notna(row.get("rank_score")):
             scores[sym] = float(row["rank_score"])
@@ -249,6 +272,15 @@ def main():
     ap.add_argument("--warn-label-threshold", type=float, default=0.02,
                     help="训练时的跌幅阈值，仅用于日志（默认 0.02）")
     args = ap.parse_args()
+    if args.warn_model:
+        try:
+            _load_warn_scorer()
+        except RuntimeError as exc:
+            ap.error(str(exc))
+    try:
+        _load_st_classifier()
+    except RuntimeError as exc:
+        ap.error(str(exc))
 
     os.makedirs(STATE_DIR, exist_ok=True)
     symbols = [s.strip() for s in open(args.symbols_file, encoding="utf-8") if s.strip()]

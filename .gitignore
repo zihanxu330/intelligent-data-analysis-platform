@@ -17,3 +17,15 @@ webapp/node_modules/
 # 备份与自检产物
 *.bak
 frontend/_shots/
+
+# Local environments, backups and one-off diagnostics
+.venv/
+venv/
+models/_backup/
+frontend/*_result.txt
+frontend/replace_verify.txt
+frontend/spot_probe.txt
+scripts_analyze/argv_out*.txt
+scripts_analyze/stock_list_check.txt
+webapp/client/node_modules/
+webapp/server/node_modules/

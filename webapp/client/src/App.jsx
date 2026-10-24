@@ -29,7 +29,7 @@ export default function App() {
     <div className="app-shell">
       <header className="app-header">
         <h1>量化回测面板</h1>
-        <p className="subtitle">A股 · 双均线策略 · 由Python + backtrader驱动</p>
+        <p className="subtitle">合成行情 / A股数据 · 多因子规则策略 · Python + backtrader</p>
       </header>
 
       <div className="app-body">

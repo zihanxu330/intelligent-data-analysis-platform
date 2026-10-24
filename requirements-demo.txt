@@ -1,0 +1,6 @@
+# Minimal dependencies for the offline synthetic CLI demo.
+backtrader==1.9.78.123
+matplotlib>=3.8
+numpy>=1.26
+pandas>=2.2
+joblib>=1.3

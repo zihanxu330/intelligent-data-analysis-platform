@@ -1,5 +1,7 @@
 # 研究阶段索引
 
+> 历史快照：以下索引来自开发环境中的本地研究目录。对应的 `output/research_stage*` 不随 GitHub 仓库分发，因此全新克隆无法仅凭此表复核数值。当前运行入口见 [README](../README.md)。
+
 只读扫描 `output/research_stage*` 生成；结论摘要取各阶段 `final_assessment.md` 或 `README.md` 首段，完整语义以原文为准。
 
 状态列为基于报告结论的关键词判定；生产代码/数据库/模型列只在报告有明确证据时填写，否则为“未核实”。
