@@ -616,4 +616,8 @@ def gen_report(state, panel, last_date, ma60_ok, nav, total_ret, mdd, state_file
 
 
 if __name__ == "__main__":
+    # Keep Chinese help and diagnostics readable when Windows pipes use cp1252.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
     main()

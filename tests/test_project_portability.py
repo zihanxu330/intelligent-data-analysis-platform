@@ -1,5 +1,6 @@
 """Guard the supported application entrypoints against machine-specific paths."""
 from pathlib import Path
+import os
 import subprocess
 import sys
 import unittest
@@ -48,11 +49,14 @@ class ProjectPortabilityTests(unittest.TestCase):
             cwd=ROOT.parent,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            env={**os.environ, "PYTHONIOENCODING": "cp1252"},
             timeout=30,
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--industry-cap", result.stdout)
+        self.assertIn("排序模型路径", result.stdout)
 
 
 if __name__ == "__main__":
