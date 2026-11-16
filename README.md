@@ -6,6 +6,21 @@ A research-oriented Python project for market data, factor engineering and backt
 
 [离线运行](#quick-start) · [Web 面板](webapp/README.md) · [环境说明](docs/environment.md) · [历史研究记录](docs/research-history.md)
 
+## Does the Amihud signal add value beyond low trading value?
+
+I tested a simple explanation for an A-share signal: stocks with a high Amihud score might owe their returns to low trading value alone. The score averages the absolute daily return divided by daily traded value over 20 sessions. To test the extra information in that ratio, I compared its top 20 stocks with a portfolio selected solely for low average traded value, matching the two portfolios by listing board, size decile within board, and industry.
+
+Both simulated accounts started with CNY 1 million and rebalanced every five sessions at the next open. The replay included lot sizes, price-limit checks, commissions, transfer fees, sell-side stamp duty and slippage. Here is the same 37-period comparison from January 5 to October 16, 2026, with only the slippage assumption changed.
+
+| Slippage per side | Amihud net return | Matched control | Difference |
+| --- | ---: | ---: | ---: |
+| 10 basis points | 20.20% | 21.47% | −1.27 pp |
+| 40 basis points | 13.69% | 12.71% | +0.98 pp |
+
+**Why could Amihud win 21 of 37 periods and still finish behind?** At base cost, its average lead in winning periods was 0.42 percentage points, while its average deficit in losing periods was 0.60. A stock-by-stock reconciliation showed that Amihud saved about CNY 9,139 in fees and simulated slippage, but lost CNY 21,817 relative to the control on price moves. I kept the simpler control in the prospective comparison. The ranking of the two strategies depends on what it costs to trade them.
+
+These figures come from a historical research replay on daily bars. Industry classifications use a snapshot, historical stock eligibility is incomplete, and daily opens approximate execution. The private market dataset is required to reproduce the figures. The [offline quick start](#quick-start) exercises the public backtesting pipeline using synthetic data.
+
 ## Trace a backtest
 
 The offline example generates 800 synthetic daily bars. To inspect one run, follow the prices from the generator through the rule strategy to the backtest result. The same command-line entry point also accepts local A-share data.
