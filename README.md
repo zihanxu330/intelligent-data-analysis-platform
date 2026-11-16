@@ -6,6 +6,16 @@ A research-oriented Python project for market data, factor engineering and backt
 
 [离线运行](#quick-start) · [Web 面板](webapp/README.md) · [环境说明](docs/environment.md) · [历史研究记录](docs/research-history.md)
 
+## Trace a backtest
+
+The offline example generates 800 synthetic daily bars. To inspect one run, follow the prices from the generator through the rule strategy to the backtest result. The same command-line entry point also accepts local A-share data.
+
+1. [Run the example](#quick-start) and open `output/demo.json`.
+2. Read the [price generator](data/fetcher.py) and the [rule strategy](strategy/ma_cross.py) to see what the strategy observes.
+3. Follow the [backtest engine](backtest/engine.py) to see how the strategy produces the reported result.
+
+For a small experiment, change the fast and slow periods and rerun the example with a different output filename. Differences on synthetic prices illustrate how the rules behave. Historical research has its own [data assumptions and limitations](docs/research-history.md).
+
 ## What is included
 
 | 模块 | 内容 |
